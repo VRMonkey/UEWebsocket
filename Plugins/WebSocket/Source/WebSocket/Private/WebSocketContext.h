@@ -23,7 +23,19 @@
 
 #include "UObject/NoExportTypes.h"
 #include "Tickable.h"
+
+#if PLATFORM_UWP
+#elif PLATFORM_HTML5
+#elif PLATFORM_WINDOWS  
+#include "PreWindowsApi.h"
 #include "libwebsockets.h"
+#include "PostWindowsApi.h" 
+#else
+#include "libwebsockets.h"
+#endif
+
+#include <iostream>
+
 #include "WebSocketContext.generated.h"
 
 
@@ -47,11 +59,20 @@ public:
 	virtual bool IsTickable() const override;
 	virtual TStatId GetStatId() const override;
 
-	UWebSocketBase* Connect(const FString& uri);
-	UWebSocketBase* Connect(const FString& uri, const TMap<FString, FString>& header);
-
+	UWebSocketBase* Connect(const FString& uri, bool& connectFail);
+	UWebSocketBase* Connect(const FString& uri, const TMap<FString, FString>& header, bool& connectFail);
+#if PLATFORM_UWP
+#elif PLATFORM_HTML5
+#else
 	static int callback_echo(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len);
+#endif
 	
 private:
+
+#if PLATFORM_UWP
+#elif PLATFORM_HTML5
+#else
 	struct lws_context* mlwsContext;
+	std::string mstrCAPath;
+#endif
 };

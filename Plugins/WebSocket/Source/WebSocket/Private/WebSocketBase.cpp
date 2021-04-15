@@ -22,14 +22,153 @@
 #include "WebSocket.h"
 #include <iostream>
 #include "WebSocketBase.h"
+
+#if PLATFORM_UWP
+#elif PLATFORM_HTML5
+#elif PLATFORM_WINDOWS 
+#include "PreWindowsApi.h"
 #include "libwebsockets.h"
+#include "PostWindowsApi.h" 
+#else
+#include "libwebsockets.h"
+#endif
 
 #define MAX_ECHO_PAYLOAD 64*1024
 
+#if PLATFORM_UWP
+using namespace concurrency;
+using namespace Platform;
+using namespace Windows::Foundation;
+using namespace Windows::Foundation::Collections;
+using namespace Windows::Networking::Sockets;
+using namespace Windows::Security::Cryptography::Certificates;
+using namespace Windows::Storage::Streams;
+using namespace Windows::UI::Core;
+using namespace Windows::UI::Xaml;
+using namespace Windows::UI::Xaml::Controls;
+using namespace Windows::UI::Xaml::Navigation;
+using namespace Windows::Web;
+
+
+FUWPSocketHelper::FUWPSocketHelper():Parent(0)
+{
+
+}
+
+FUWPSocketHelper::~FUWPSocketHelper()
+{
+	Parent = 0;
+}
+
+void FUWPSocketHelper::SetParent(int64 p)
+{
+	Parent = p;
+}
+
+void FUWPSocketHelper::MessageReceived(Windows::Networking::Sockets::MessageWebSocket^ sender, Windows::Networking::Sockets::MessageWebSocketMessageReceivedEventArgs^ args)
+{
+	if (Parent != 0)
+	{
+		UWebSocketBase* p = (UWebSocketBase*)Parent;
+		p->MessageReceived(sender, args);
+	}
+}
+
+void FUWPSocketHelper::OnUWPClosed(Windows::Networking::Sockets::IWebSocket^ sender, Windows::Networking::Sockets::WebSocketClosedEventArgs^ args)
+{
+	if (Parent != 0)
+	{
+		UWebSocketBase* p = (UWebSocketBase*)Parent;
+		p->OnUWPClosed(sender, args);
+	}
+}
+#elif PLATFORM_HTML5
+
+void FHtml5SocketHelper::Tick(float DeltaTime)
+{
+	if (mHostWebSocket == nullptr)
+	{
+		return;
+	}
+
+	if (mHostWebSocket->mIsError)
+	{
+		return;
+	}
+
+	if (mHostWebSocket->mWebSocketRef < 0)
+	{
+		return;
+	}
+
+	// check connect
+	char szError[128] = { 0 };
+	int checkError = SocketError(mHostWebSocket->mWebSocketRef, szError, (int)sizeof(szError) - 1);
+	if ( (checkError == 0) && !mHostWebSocket->mConnectSuccess && SocketState(mHostWebSocket->mWebSocketRef) )
+	{
+		mHostWebSocket->mConnectSuccess = true;
+		mHostWebSocket->OnConnectComplete.Broadcast();
+	}
+		
+	if(checkError != 0)
+	{
+		mHostWebSocket->mIsError = true;
+
+		if (!mHostWebSocket->mConnectSuccess)
+		{
+			FString strError = UTF8_TO_TCHAR(szError);
+			mHostWebSocket->OnConnectError.Broadcast(strError);
+		}
+		else
+		{
+			mHostWebSocket->OnClosed.Broadcast();
+		}
+
+		return;
+	}
+	
+	// check data receive
+	int iRecvLen = SocketRecvLength(mHostWebSocket->mWebSocketRef);
+	if (iRecvLen > 0)
+	{
+		char* pData = new char[iRecvLen + 1];
+		SocketRecv(mHostWebSocket->mWebSocketRef, pData, iRecvLen);
+		pData[iRecvLen] = (char)0;
+		mHostWebSocket->ProcessRead((const char*)pData, (int)iRecvLen);
+		delete[]pData;
+	}
+}
+
+bool FHtml5SocketHelper::IsTickable() const
+{
+	return true;
+}
+
+TStatId FHtml5SocketHelper::GetStatId() const
+{
+	return TStatId();
+}
+
+#endif
+
+
+
+
 UWebSocketBase::UWebSocketBase()
 {
+#if PLATFORM_UWP
+	messageWebSocket = nullptr;
+	uwpSocketHelper = ref new FUWPSocketHelper();
+	uwpSocketHelper->SetParent( (int64)this);
+#elif PLATFORM_HTML5
+	mWebSocketRef = -1;
+	mConnectSuccess = false;
+	mIsError = false;
+	
+#else
 	mlwsContext = nullptr;
 	mlws = nullptr;
+#endif
 }
 
 
@@ -37,23 +176,163 @@ void UWebSocketBase::BeginDestroy()
 {
 	Super::BeginDestroy();
 
+#if PLATFORM_UWP
+	
+	uwpSocketHelper->SetParent(0);
+	uwpSocketHelper = nullptr;
+	if (messageWebSocket != nullptr)
+	{
+		delete messageWebSocket;
+		messageWebSocket = nullptr;
+	}
+#elif PLATFORM_HTML5
+	mHtml5SocketHelper.UnBind();
+#else
 	if (mlws != nullptr)
 	{
 		lws_set_wsi_user(mlws, NULL);
 		mlws = nullptr;
 	}
+#endif
 }
 
-void UWebSocketBase::Connect(const FString& uri, const TMap<FString, FString>& header)
+#if PLATFORM_UWP
+
+void UWebSocketBase::MessageReceived(Windows::Networking::Sockets::MessageWebSocket^ sender, Windows::Networking::Sockets::MessageWebSocketMessageReceivedEventArgs^ args)
+{
+	Windows::ApplicationModel::Core::CoreApplication::MainView->Dispatcher->RunAsync(
+		Windows::UI::Core::CoreDispatcherPriority::Normal,
+		ref new Windows::UI::Core::DispatchedHandler([this, args]()
+	{
+		DataReader^ reader = args->GetDataReader();
+		reader->UnicodeEncoding = UnicodeEncoding::Utf8;
+		try
+		{
+			String^ read = reader->ReadString(reader->UnconsumedBufferLength);
+			FString strData(read->Data(), read->Length());
+			OnReceiveData.Broadcast(strData);
+		}
+		catch (Exception^ ex)
+		{
+		}
+		delete reader;
+	}));
+}
+
+void UWebSocketBase::OnUWPClosed(Windows::Networking::Sockets::IWebSocket^ sender, Windows::Networking::Sockets::WebSocketClosedEventArgs^ args)
+{
+	Windows::ApplicationModel::Core::CoreApplication::MainView->Dispatcher->RunAsync(
+		Windows::UI::Core::CoreDispatcherPriority::Normal,
+		ref new Windows::UI::Core::DispatchedHandler([this]()
+	{
+		OnClosed.Broadcast();
+	}));
+}
+
+Concurrency::task<void> UWebSocketBase::ConnectAsync(Platform::String^ uriString)
+{
+	Uri^ server = nullptr;
+	try
+	{
+		server = ref new Uri(uriString);
+	}
+	catch (NullReferenceException^)
+	{
+		return task_from_result();
+	}
+	catch (InvalidArgumentException^)
+	{
+		return task_from_result();
+	}
+
+	messageWebSocket = ref new MessageWebSocket();
+	messageWebSocket->Control->MessageType = SocketMessageType::Utf8;
+	messageWebSocket->MessageReceived +=
+		ref new TypedEventHandler<
+		MessageWebSocket^,
+		MessageWebSocketMessageReceivedEventArgs^>(uwpSocketHelper, &FUWPSocketHelper::MessageReceived);
+	messageWebSocket->Closed += ref new TypedEventHandler<IWebSocket^, WebSocketClosedEventArgs^>(uwpSocketHelper, &FUWPSocketHelper::OnUWPClosed);
+
+	return create_task(messageWebSocket->ConnectAsync(server))
+		.then([this](task<void> previousTask)
+	{
+		try
+		{
+			previousTask.get();
+		}
+		catch (Exception^ ex)
+		{
+			delete messageWebSocket;
+			messageWebSocket = nullptr;
+			return;
+		}
+
+		messageWriter = ref new DataWriter(messageWebSocket->OutputStream);
+	});
+}
+
+
+Concurrency::task<void> UWebSocketBase::SendAsync(Platform::String^ message)
+{
+	if (message == "")
+	{
+		return task_from_result();
+	}
+	messageWriter->WriteString(message);
+
+	return create_task(messageWriter->StoreAsync())
+		.then([this](task<unsigned int> previousTask)
+	{
+		try
+		{
+			previousTask.get();
+		}
+		catch (Exception^ ex)
+		{
+			return;
+		}
+	});
+}
+
+
+#endif
+
+bool UWebSocketBase::Connect(const FString& uri, const TMap<FString, FString>& header)
 {
 	if (uri.IsEmpty())
 	{
-		return;
+		return false;
 	}
 
+#if PLATFORM_UWP
+	ConnectAsync(ref new String(*uri) ).then([this]()
+	{
+		Windows::ApplicationModel::Core::CoreApplication::MainView->Dispatcher->RunAsync(
+			Windows::UI::Core::CoreDispatcherPriority::Normal,
+			ref new Windows::UI::Core::DispatchedHandler([this]()
+		{
+			if (messageWebSocket != nullptr)
+			{
+				OnConnectComplete.Broadcast();
+			}
+			else
+			{
+				OnConnectError.Broadcast(TEXT("connect error") );
+			}
+		}));
+	});
+
+	return true;
+#elif PLATFORM_HTML5
+	mHtml5SocketHelper.Bind(this);
+	std::string strUrl = TCHAR_TO_UTF8(*uri);
+	mWebSocketRef = SocketCreate(strUrl.c_str() );
+	
+	return true;
+#else
 	if (mlwsContext == nullptr)
 	{
-		return;
+		return false;
 	}
 
 	int iUseSSL = 0;
@@ -61,14 +340,14 @@ void UWebSocketBase::Connect(const FString& uri, const TMap<FString, FString>& h
 	if (iPos == INDEX_NONE)
 	{
 		//UE_LOG(WebSocket, Error, TEXT("Invalid Websocket address:%s"), *uri);
-		return;
+		return false;
 	}
 
 	FString strProtocol = uri.Left(iPos);
 	if (strProtocol.ToUpper() != TEXT("WS") && strProtocol.ToUpper() != TEXT("WSS"))
 	{
 		//UE_LOG(WebSocket, Error, TEXT("Invalid Protol:%s"), *strProtocol);
-		return;
+		return false;
 	}
 
 	if (strProtocol.ToUpper() == TEXT("WSS"))
@@ -128,14 +407,26 @@ void UWebSocketBase::Connect(const FString& uri, const TMap<FString, FString>& h
 	if (mlws == nullptr)
 	{
 		UE_LOG(WebSocket, Error, TEXT("create client connect fail"));
-		return;
+		return false;
 	}
 
 	mHeaderMap = header;
+
+	return true;
+#endif
 }
 
 void UWebSocketBase::SendText(const FString& data)
 {
+#if PLATFORM_UWP
+	SendAsync(ref new String(*data)).then([this]()
+	{
+	});
+
+#elif PLATFORM_HTML5
+	std::string strData = TCHAR_TO_UTF8(*data);
+	SocketSend(mWebSocketRef, strData.c_str(), (int)strData.size() );
+#else
 	if (data.Len() > MAX_ECHO_PAYLOAD)
 	{
 		UE_LOG(WebSocket, Error, TEXT("too large package to send > MAX_ECHO_PAYLOAD:%d > %d"), data.Len(), MAX_ECHO_PAYLOAD);
@@ -150,10 +441,14 @@ void UWebSocketBase::SendText(const FString& data)
 	{
 		UE_LOG(WebSocket, Error, TEXT("the socket is closed, SendText fail"));
 	}
+#endif
 }
 
 void UWebSocketBase::ProcessWriteable()
 {
+#if PLATFORM_UWP
+#elif PLATFORM_HTML5
+#else
 	while (mSendQueue.Num() > 0)
 	{
 		std::string strData = TCHAR_TO_UTF8(*mSendQueue[0]);
@@ -164,6 +459,7 @@ void UWebSocketBase::ProcessWriteable()
 
 		mSendQueue.RemoveAt(0);
 	}
+#endif
 }
 
 void UWebSocketBase::ProcessRead(const char* in, int len)
@@ -175,6 +471,9 @@ void UWebSocketBase::ProcessRead(const char* in, int len)
 
 bool UWebSocketBase::ProcessHeader(unsigned char** p, unsigned char* end)
 {
+#if PLATFORM_UWP
+#elif PLATFORM_HTML5
+#else
 	if (mHeaderMap.Num() == 0)
 	{
 		return true;
@@ -191,12 +490,25 @@ bool UWebSocketBase::ProcessHeader(unsigned char** p, unsigned char* end)
 			return false;
 		}
 	}
+#endif
 
 	return true;
 }
 
 void UWebSocketBase::Close()
 {
+#if PLATFORM_UWP
+	if (messageWriter != nullptr)
+	{
+		messageWriter->DetachStream();
+		delete messageWriter;
+		messageWriter = nullptr;
+	}
+#elif PLATFORM_HTML5
+	SocketClose(mWebSocketRef);
+	mWebSocketRef = -1;
+	OnClosed.Broadcast();
+#else
 	if (mlws != nullptr)
 	{
 		lws_set_wsi_user(mlws, NULL);
@@ -204,14 +516,19 @@ void UWebSocketBase::Close()
 	}
 
 	OnClosed.Broadcast();
+#endif
 }
 
 void UWebSocketBase::Cleanlws()
 {
+#if PLATFORM_UWP
+#elif PLATFORM_HTML5
+#else
 	if (mlws != nullptr)
 	{
 		lws_set_wsi_user(mlws, NULL);
 	}
+#endif
 }
 
 

@@ -24,7 +24,9 @@
 #include "WebSocketBlueprintLibrary.h"
 #include "Runtime/Launch/Resources/Version.h"
 
-TSharedPtr<UWebSocketContext> s_websocketCtx;
+
+
+UWebSocketContext* s_websocketCtx;
 
 static bool GetTextFromObject(const TSharedRef<FJsonObject>& Obj, FText& TextOut)
 {
@@ -47,32 +49,26 @@ static bool GetTextFromObject(const TSharedRef<FJsonObject>& Obj, FText& TextOut
 	return false;
 }
 
-FString UWebSocketBlueprintLibrary::StandardizeCase(const FString &StringIn)
-{
-	// this probably won't work for all cases, consider downcaseing the string fully
-	FString FixedString = StringIn;
-	FixedString[0] = FChar::ToLower(FixedString[0]); // our json classes/variable start lower case
-	FixedString.ReplaceInline(TEXT("ID"), TEXT("Id"), ESearchCase::CaseSensitive); // Id is standard instead of ID, some of our fnames use ID
-	return FixedString;
-}
 
-UWebSocketBase* UWebSocketBlueprintLibrary::Connect(const FString& url)
+
+UWebSocketBase* UWebSocketBlueprintLibrary::Connect(const FString& url, bool& connectFail)
 {
-	if (s_websocketCtx.Get() == nullptr)
+	if (!s_websocketCtx)
 	{
-		s_websocketCtx =  MakeShareable(NewObject<UWebSocketContext>() );
+		
+		s_websocketCtx = NewObject<UWebSocketContext>();
 		s_websocketCtx->CreateCtx();
 		s_websocketCtx->AddToRoot();
 	}
 
-	return s_websocketCtx->Connect(url, TMap<FString, FString>() );
+	return s_websocketCtx->Connect(url, TMap<FString, FString>(), connectFail);
 }
 
-UWebSocketBase* UWebSocketBlueprintLibrary::ConnectWithHeader(const FString& url, const TArray<FWebSocketHeaderPair>& header)
+UWebSocketBase* UWebSocketBlueprintLibrary::ConnectWithHeader(const FString& url, const TArray<FWebSocketHeaderPair>& header, bool& connectFail)
 {
-	if (s_websocketCtx.Get() == nullptr)
+	if (!s_websocketCtx)
 	{
-		s_websocketCtx = MakeShareable(NewObject<UWebSocketContext>());
+		s_websocketCtx = NewObject<UWebSocketContext>();
 		s_websocketCtx->CreateCtx();
 		s_websocketCtx->AddToRoot();
 	}
@@ -83,7 +79,7 @@ UWebSocketBase* UWebSocketBlueprintLibrary::ConnectWithHeader(const FString& url
 		headerMap.Add(header[i].key, header[i].value);
 	}
 
-	return s_websocketCtx->Connect(url, headerMap);
+	return s_websocketCtx->Connect(url, headerMap, connectFail);
 }
 
 bool UWebSocketBlueprintLibrary::GetJsonIntField(const FString& data, const FString& key, int& iValue)
@@ -145,11 +141,11 @@ UObject* UWebSocketBlueprintLibrary::JsonToObject(const FString& data, UClass * 
 }
 
 
-bool UWebSocketBlueprintLibrary::JsonValueToUProperty(TSharedPtr<FJsonValue> JsonValue, UProperty* Property, void* OutValue, int64 CheckFlags, int64 SkipFlags)
+bool UWebSocketBlueprintLibrary::JsonValueToFProperty(TSharedPtr<FJsonValue> JsonValue, UProperty* Property, void* OutValue, int64 CheckFlags, int64 SkipFlags)
 {
 	if (!JsonValue.IsValid())
 	{
-		UE_LOG(WebSocket, Error, TEXT("JsonValueToUProperty - Invalid value JSON key"));
+		UE_LOG(WebSocket, Error, TEXT("JsonValueToFProperty - Invalid value JSON key"));
 		return false;
 	}
 
@@ -160,7 +156,7 @@ bool UWebSocketBlueprintLibrary::JsonValueToUProperty(TSharedPtr<FJsonValue> Jso
 	{
 		if (bArrayProperty)
 		{
-			UE_LOG(WebSocket, Error, TEXT("JsonValueToUProperty - Attempted to import TArray from non-array JSON key"));
+			UE_LOG(WebSocket, Error, TEXT("JsonValueToFProperty - Attempted to import TArray from non-array JSON key"));
 			return false;
 		}
 
@@ -169,14 +165,14 @@ bool UWebSocketBlueprintLibrary::JsonValueToUProperty(TSharedPtr<FJsonValue> Jso
 			UE_LOG(WebSocket, Warning, TEXT("Ignoring excess properties when deserializing %s"), *Property->GetName());
 		}
 
-		return ConvertScalarJsonValueToUProperty(JsonValue, Property, OutValue, CheckFlags, SkipFlags);
+		return ConvertScalarJsonValueToFProperty(JsonValue, Property, OutValue, CheckFlags, SkipFlags);
 	}
 
-	// In practice, the ArrayDim == 1 check ought to be redundant, since nested arrays of UPropertys are not supported
+	// In practice, the ArrayDim == 1 check ought to be redundant, since nested arrays of FPropertys are not supported
 	if (bArrayProperty && Property->ArrayDim == 1)
 	{
 		// Read into TArray
-		return ConvertScalarJsonValueToUProperty(JsonValue, Property, OutValue, CheckFlags, SkipFlags);
+		return ConvertScalarJsonValueToFProperty(JsonValue, Property, OutValue, CheckFlags, SkipFlags);
 	}
 
 	// We're deserializing a JSON array
@@ -190,7 +186,7 @@ bool UWebSocketBlueprintLibrary::JsonValueToUProperty(TSharedPtr<FJsonValue> Jso
 	int ItemsToRead = FMath::Clamp(ArrayValue.Num(), 0, Property->ArrayDim);
 	for (int Index = 0; Index != ItemsToRead; ++Index)
 	{
-		if (!ConvertScalarJsonValueToUProperty(ArrayValue[Index], Property, (char*)OutValue + Index * Property->ElementSize, CheckFlags, SkipFlags))
+		if (!ConvertScalarJsonValueToFProperty(ArrayValue[Index], Property, (char*)OutValue + Index * Property->ElementSize, CheckFlags, SkipFlags))
 		{
 			return false;
 		}
@@ -200,7 +196,7 @@ bool UWebSocketBlueprintLibrary::JsonValueToUProperty(TSharedPtr<FJsonValue> Jso
 
 extern bool GetTextFromObject(const TSharedRef<FJsonObject>& Obj, FText& TextOut);
 
-bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJsonValue> JsonValue, UProperty* Property, void* OutValue, int64 CheckFlags, int64 SkipFlags)
+bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToFProperty(TSharedPtr<FJsonValue> JsonValue, UProperty* Property, void* OutValue, int64 CheckFlags, int64 SkipFlags)
 {
 	if (UEnumProperty* EnumProperty = Cast<UEnumProperty>(Property))
 	{
@@ -213,7 +209,7 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 			int64 IntValue = Enum->GetValueByName(FName(*StrValue));
 			if (IntValue == INDEX_NONE)
 			{
-				//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Unable import enum %s from string value %s for property %s"), *Enum->CppType, *StrValue, *Property->GetNameCPP());
+				//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Unable import enum %s from string value %s for property %s"), *Enum->CppType, *StrValue, *Property->GetNameCPP());
 				return false;
 			}
 			EnumProperty->GetUnderlyingProperty()->SetIntPropertyValue(OutValue, IntValue);
@@ -235,7 +231,7 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 			int64 IntValue = Enum->GetValueByName(FName(*StrValue));
 			if (IntValue == INDEX_NONE)
 			{
-				//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Unable import enum %s from string value %s for property %s"), *Enum->CppType, *StrValue, *Property->GetNameCPP());
+				//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Unable import enum %s from string value %s for property %s"), *Enum->CppType, *StrValue, *Property->GetNameCPP());
 				return false;
 			}
 			NumericProperty->SetIntPropertyValue(OutValue, IntValue);
@@ -260,7 +256,7 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 		}
 		else
 		{
-			//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Unable to set numeric property type %s for property %s"), *Property->GetClass()->GetName(), *Property->GetNameCPP());
+			//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Unable to set numeric property type %s for property %s"), *Property->GetClass()->GetName(), *Property->GetNameCPP());
 			return false;
 		}
 	}
@@ -291,9 +287,9 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 				const TSharedPtr<FJsonValue>& ArrayValueItem = ArrayValue[i];
 				if (ArrayValueItem.IsValid() && !ArrayValueItem->IsNull())
 				{
-					if (!JsonValueToUProperty(ArrayValueItem, ArrayProperty->Inner, Helper.GetRawPtr(i), CheckFlags & (~CPF_ParmFlags), SkipFlags))
+					if (!JsonValueToFProperty(ArrayValueItem, ArrayProperty->Inner, Helper.GetRawPtr(i), CheckFlags & (~CPF_ParmFlags), SkipFlags))
 					{
-						//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Unable to deserialize array element [%d] for property %s"), i, *Property->GetNameCPP());
+						//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Unable to deserialize array element [%d] for property %s"), i, *Property->GetNameCPP());
 						return false;
 					}
 				}
@@ -301,7 +297,7 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 		}
 		else
 		{
-			//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Attempted to import TArray from non-array JSON key for property %s"), *Property->GetNameCPP());
+			//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Attempted to import TArray from non-array JSON key for property %s"), *Property->GetNameCPP());
 			return false;
 		}
 	}
@@ -322,12 +318,12 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 
 					TSharedPtr<FJsonValueString> TempKeyValue = MakeShareable(new FJsonValueString(Entry.Key));
 
-					const bool bKeySuccess = JsonValueToUProperty(TempKeyValue, MapProperty->KeyProp, Helper.GetKeyPtr(NewIndex), CheckFlags & (~CPF_ParmFlags), SkipFlags);
-					const bool bValueSuccess = JsonValueToUProperty(Entry.Value, MapProperty->ValueProp, Helper.GetValuePtr(NewIndex), CheckFlags & (~CPF_ParmFlags), SkipFlags);
+					const bool bKeySuccess = JsonValueToFProperty(TempKeyValue, MapProperty->KeyProp, Helper.GetKeyPtr(NewIndex), CheckFlags & (~CPF_ParmFlags), SkipFlags);
+					const bool bValueSuccess = JsonValueToFProperty(Entry.Value, MapProperty->ValueProp, Helper.GetValuePtr(NewIndex), CheckFlags & (~CPF_ParmFlags), SkipFlags);
 
 					if (!(bKeySuccess && bValueSuccess))
 					{
-						//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Unable to deserialize map element [key: %s] for property %s"), *Entry.Key, *Property->GetNameCPP());
+						//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Unable to deserialize map element [key: %s] for property %s"), *Entry.Key, *Property->GetNameCPP());
 						return false;
 					}
 				}
@@ -337,7 +333,7 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 		}
 		else
 		{
-			//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Attempted to import TMap from non-object JSON key for property %s"), *Property->GetNameCPP());
+			//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Attempted to import TMap from non-object JSON key for property %s"), *Property->GetNameCPP());
 			return false;
 		}
 	}
@@ -357,9 +353,9 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 				if (ArrayValueItem.IsValid() && !ArrayValueItem->IsNull())
 				{
 					int32 NewIndex = Helper.AddDefaultValue_Invalid_NeedsRehash();
-					if (!JsonValueToUProperty(ArrayValueItem, SetProperty->ElementProp, Helper.GetElementPtr(NewIndex), CheckFlags & (~CPF_ParmFlags), SkipFlags))
+					if (!JsonValueToFProperty(ArrayValueItem, SetProperty->ElementProp, Helper.GetElementPtr(NewIndex), CheckFlags & (~CPF_ParmFlags), SkipFlags))
 					{
-						//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Unable to deserialize set element [%d] for property %s"), i, *Property->GetNameCPP());
+						//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Unable to deserialize set element [%d] for property %s"), i, *Property->GetNameCPP());
 						return false;
 					}
 				}
@@ -369,11 +365,11 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 		}
 		else
 		{
-			//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Attempted to import TSet from non-array JSON key for property %s"), *Property->GetNameCPP());
+			//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Attempted to import TSet from non-array JSON key for property %s"), *Property->GetNameCPP());
 			return false;
 		}
 	}
-	else if (UTextProperty *TextProperty = Cast<UTextProperty>(Property))
+	else if (UTextProperty *TextProperty = Cast<UTextProperty >(Property))
 	{
 		if (JsonValue->Type == EJson::String)
 		{
@@ -389,14 +385,14 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 			FText Text;
 			if (!GetTextFromObject(Obj.ToSharedRef(), Text))
 			{
-				//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Attempted to import FText from JSON object with invalid keys for property %s"), *Property->GetNameCPP());
+				//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Attempted to import FText from JSON object with invalid keys for property %s"), *Property->GetNameCPP());
 				return false;
 			}
 			TextProperty->SetPropertyValue(OutValue, Text);
 		}
 		else
 		{
-			//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Attempted to import FText from JSON that was neither string nor object for property %s"), *Property->GetNameCPP());
+			//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Attempted to import FText from JSON that was neither string nor object for property %s"), *Property->GetNameCPP());
 			return false;
 		}
 	}
@@ -411,7 +407,7 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 			check(Obj.IsValid()); // should not fail if Type == EJson::Object
 			if (!JsonObjectToUStruct(Obj.ToSharedRef(), StructProperty->Struct, OutValue, CheckFlags & (~CPF_ParmFlags), SkipFlags))
 			{
-				//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - JsonObjectToUStruct failed for property %s"), *Property->GetNameCPP());
+				//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - JsonObjectToUStruct failed for property %s"), *Property->GetNameCPP());
 				return false;
 			}
 		}
@@ -461,7 +457,7 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 			}
 			else
 			{
-				//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Unable to import FDateTime for property %s"), *Property->GetNameCPP());
+				//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Unable to import FDateTime for property %s"), *Property->GetNameCPP());
 				return false;
 			}
 		}
@@ -475,7 +471,7 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 		}
 		else
 		{
-			//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Attempted to import UStruct from non-object JSON key for property %s"), *Property->GetNameCPP());
+			//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Attempted to import UStruct from non-object JSON key for property %s"), *Property->GetNameCPP());
 			return false;
 		}
 	}
@@ -492,7 +488,7 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 		check(Obj.IsValid()); // should not fail if Type == EJson::Object
 		if (!JsonObjectToUStruct(Obj.ToSharedRef(), ObjectProperty->PropertyClass, pNewObj, CheckFlags & (~CPF_ParmFlags), SkipFlags))
 		{
-			//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - JsonObjectToUStruct failed for property %s"), *Property->GetNameCPP());
+			//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - JsonObjectToUStruct failed for property %s"), *Property->GetNameCPP());
 			return false;
 		}
 	}
@@ -501,7 +497,7 @@ bool UWebSocketBlueprintLibrary::ConvertScalarJsonValueToUProperty(TSharedPtr<FJ
 		// Default to expect a string for everything else
 		if (Property->ImportText(*JsonValue->AsString(), OutValue, 0, NULL) == NULL)
 		{
-			//UE_LOG(LogJson, Error, TEXT("JsonValueToUProperty - Unable import property type %s from string value for property %s"), *Property->GetClass()->GetName(), *Property->GetNameCPP());
+			//UE_LOG(LogJson, Error, TEXT("JsonValueToFProperty - Unable import property type %s from string value for property %s"), *Property->GetClass()->GetName(), *Property->GetNameCPP());
 			return false;
 		}
 	}
@@ -560,7 +556,7 @@ bool UWebSocketBlueprintLibrary::JsonAttributesToUStruct(const TMap< FString, TS
 		}
 
 		void* Value = Property->ContainerPtrToValuePtr<uint8>(OutStruct);
-		if (!JsonValueToUProperty(JsonValue, Property, Value, CheckFlags, SkipFlags))
+		if (!JsonValueToFProperty(JsonValue, Property, Value, CheckFlags, SkipFlags))
 		{
 			UE_LOG(LogJson, Error, TEXT("JsonObjectToUStruct - Unable to parse %s.%s from JSON"), *StructDefinition->GetName(), *PropertyName);
 			return false;
@@ -610,15 +606,15 @@ bool UWebSocketBlueprintLibrary::UObjectToJsonAttributes(const UStruct* StructDe
 			continue;
 		}
 
-		FString VariableName = StandardizeCase(Property->GetName());
+		FString VariableName = Property->GetName();
 		const void* Value = Property->ContainerPtrToValuePtr<uint8>(Struct);
 
 		// convert the property to a FJsonValue
-		TSharedPtr<FJsonValue> JsonValue = UPropertyToJsonValue(Property, Value, CheckFlags, SkipFlags);
+		TSharedPtr<FJsonValue> JsonValue = FPropertyToJsonValue(Property, Value, CheckFlags, SkipFlags);
 		if (!JsonValue.IsValid())
 		{
-			UClass* PropClass = Property->GetClass();
-			UE_LOG(WebSocket, Warning, TEXT("UObjectToJsonObject - Unhandled property type '%s': %s"), *PropClass->GetName(), *Property->GetPathName());
+			//UClass* PropClass = Property->GetClass();
+			//UE_LOG(WebSocket, Warning, TEXT("UObjectToJsonObject - Unhandled property type '%s': %s"), *PropClass->GetName(), *Property->GetPathName());
 			continue;
 		}
 
@@ -629,22 +625,22 @@ bool UWebSocketBlueprintLibrary::UObjectToJsonAttributes(const UStruct* StructDe
 	return true;
 }
 
-TSharedPtr<FJsonValue> UWebSocketBlueprintLibrary::UPropertyToJsonValue(UProperty* Property, const void* Value, int64 CheckFlags, int64 SkipFlags)
+TSharedPtr<FJsonValue> UWebSocketBlueprintLibrary::FPropertyToJsonValue(UProperty* Property, const void* Value, int64 CheckFlags, int64 SkipFlags)
 {
 	if (Property->ArrayDim == 1)
 	{
-		return ConvertScalarUPropertyToJsonValue(Property, Value, CheckFlags, SkipFlags);
+		return ConvertScalarFPropertyToJsonValue(Property, Value, CheckFlags, SkipFlags);
 	}
 
 	TArray< TSharedPtr<FJsonValue> > Array;
 	for (int Index = 0; Index != Property->ArrayDim; ++Index)
 	{
-		Array.Add(ConvertScalarUPropertyToJsonValue(Property, (char*)Value + Index * Property->ElementSize, CheckFlags, SkipFlags));
+		Array.Add(ConvertScalarFPropertyToJsonValue(Property, (char*)Value + Index * Property->ElementSize, CheckFlags, SkipFlags));
 	}
 	return MakeShareable(new FJsonValueArray(Array));
 }
 
-TSharedPtr<FJsonValue> UWebSocketBlueprintLibrary::ConvertScalarUPropertyToJsonValue(UProperty* Property, const void* Value, int64 CheckFlags, int64 SkipFlags)
+TSharedPtr<FJsonValue> UWebSocketBlueprintLibrary::ConvertScalarFPropertyToJsonValue(UProperty* Property, const void* Value, int64 CheckFlags, int64 SkipFlags)
 {
 	// See if there's a custom export callback first, so it can override default behavior
 	
@@ -697,7 +693,7 @@ TSharedPtr<FJsonValue> UWebSocketBlueprintLibrary::ConvertScalarUPropertyToJsonV
 	{
 		return MakeShareable(new FJsonValueString(StringProperty->GetPropertyValue(Value)));
 	}
-	else if (UTextProperty *TextProperty = Cast<UTextProperty>(Property))
+	else if (UTextProperty  *TextProperty = Cast<UTextProperty >(Property))
 	{
 		return MakeShareable(new FJsonValueString(TextProperty->GetPropertyValue(Value).ToString()));
 	}
@@ -707,7 +703,7 @@ TSharedPtr<FJsonValue> UWebSocketBlueprintLibrary::ConvertScalarUPropertyToJsonV
 		FScriptArrayHelper Helper(ArrayProperty, Value);
 		for (int32 i = 0, n = Helper.Num(); i<n; ++i)
 		{
-			TSharedPtr<FJsonValue> Elem = UPropertyToJsonValue(ArrayProperty->Inner, Helper.GetRawPtr(i), CheckFlags & (~CPF_ParmFlags), SkipFlags);
+			TSharedPtr<FJsonValue> Elem = FPropertyToJsonValue(ArrayProperty->Inner, Helper.GetRawPtr(i), CheckFlags & (~CPF_ParmFlags), SkipFlags);
 			if (Elem.IsValid())
 			{
 				// add to the array
@@ -724,7 +720,7 @@ TSharedPtr<FJsonValue> UWebSocketBlueprintLibrary::ConvertScalarUPropertyToJsonV
 		{
 			if (Helper.IsValidIndex(i))
 			{
-				TSharedPtr<FJsonValue> Elem = UPropertyToJsonValue(SetProperty->ElementProp, Helper.GetElementPtr(i), CheckFlags & (~CPF_ParmFlags), SkipFlags);
+				TSharedPtr<FJsonValue> Elem = FPropertyToJsonValue(SetProperty->ElementProp, Helper.GetElementPtr(i), CheckFlags & (~CPF_ParmFlags), SkipFlags);
 				if (Elem.IsValid())
 				{
 					// add to the array
@@ -743,8 +739,8 @@ TSharedPtr<FJsonValue> UWebSocketBlueprintLibrary::ConvertScalarUPropertyToJsonV
 		{
 			if (Helper.IsValidIndex(i))
 			{
-				TSharedPtr<FJsonValue> KeyElement = UPropertyToJsonValue(MapProperty->KeyProp, Helper.GetKeyPtr(i), CheckFlags & (~CPF_ParmFlags), SkipFlags);
-				TSharedPtr<FJsonValue> ValueElement = UPropertyToJsonValue(MapProperty->ValueProp, Helper.GetValuePtr(i), CheckFlags & (~CPF_ParmFlags), SkipFlags);
+				TSharedPtr<FJsonValue> KeyElement = FPropertyToJsonValue(MapProperty->KeyProp, Helper.GetKeyPtr(i), CheckFlags & (~CPF_ParmFlags), SkipFlags);
+				TSharedPtr<FJsonValue> ValueElement = FPropertyToJsonValue(MapProperty->ValueProp, Helper.GetValuePtr(i), CheckFlags & (~CPF_ParmFlags), SkipFlags);
 				if (KeyElement.IsValid() && ValueElement.IsValid())
 				{
 					Out->SetField(KeyElement->AsString(), ValueElement);
